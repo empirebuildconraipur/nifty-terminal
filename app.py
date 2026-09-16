@@ -1,21 +1,22 @@
 from datetime import datetime, timedelta, timezone
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import yfinance as yf
 
 app = Flask(__name__)
 
-# Global trade history ledger
+# Global state for active running trade & history log
+active_trade = None
 trade_history = []
 
 
 def get_ist_time():
-  # Force Indian Standard Time (IST = UTC + 5:30) regardless of server location
   ist_zone = timezone(timedelta(hours=5, minutes=30))
   return datetime.now(ist_zone).strftime('%H:%M:%S')
 
 
 @app.route('/api/live-price')
 def live_price():
+  global active_trade
   try:
     nifty = yf.Ticker('^NSEI')
     price = nifty.fast_info.get('lastPrice')
@@ -28,7 +29,38 @@ def live_price():
   price = float(price) if price else 23250.0
   current_time_str = get_ist_time()
 
-  if int(price * 10) % 3 == 0:
+  # Check active running trade outcome against current live market price
+  if active_trade and active_trade.get('status') == 'RUNNING':
+    curr_price = price
+    t_type = active_trade['type']
+    entry = active_trade['entry']
+    target = active_trade['target']
+    sl = active_trade['sl']
+
+    if t_type == 'CE':
+      if curr_price >= target:
+        active_trade['status'] = 'TARGET HIT 🎯 (+25 Pts)'
+        active_trade['exit_time'] = current_time_str
+        trade_history.insert(0, active_trade.copy())
+        active_trade = None
+      elif curr_price <= sl:
+        active_trade['status'] = 'SL HIT 🛑'
+        active_trade['exit_time'] = current_time_str
+        trade_history.insert(0, active_trade.copy())
+        active_trade = None
+    elif t_type == 'PE':
+      if curr_price <= target:
+        active_trade['status'] = 'TARGET HIT 🎯 (+25 Pts)'
+        active_trade['exit_time'] = current_time_str
+        trade_history.insert(0, active_trade.copy())
+        active_trade = None
+      elif curr_price >= sl:
+        active_trade['status'] = 'SL HIT 🛑'
+        active_trade['exit_time'] = current_time_str
+        trade_history.insert(0, active_trade.copy())
+        active_trade = None
+
+  if int(price * 10) % 2 == 0:
     trend = 'STRONG BULLISH (CE)'
     ce_entry = int(price)
     ce_target = int(price) + 25
@@ -37,7 +69,7 @@ def live_price():
     signal_msg = (
         '🚀 HIGH WIN-RATE BUY CE SIGNAL: EMA Crossover + VWAP Support Confirmed!'
     )
-  elif int(price * 10) % 3 == 1:
+  else:
     trend = 'STRONG BEARISH (PE)'
     pe_entry = int(price)
     pe_target = int(price) - 25
@@ -45,13 +77,6 @@ def live_price():
     ce_entry, ce_target, ce_sl = 0, 0, 0
     signal_msg = (
         '🔻 HIGH WIN-RATE BUY PE SIGNAL: Breakdown below VWAP & EMA Resistance!'
-    )
-  else:
-    trend = 'SIDEWAYS / NO TRADE'
-    ce_entry, ce_target, ce_sl = 0, 0, 0
-    pe_entry, pe_target, pe_sl = 0, 0, 0
-    signal_msg = (
-        '⏳ WAITING FOR HIGH PROBABILITY SETUP (Market Consolidated)'
     )
 
   return jsonify({
@@ -65,39 +90,41 @@ def live_price():
       'pe_target': pe_target,
       'pe_sl': pe_sl,
       'time': current_time_str,
+      'active_trade': active_trade,
   })
 
 
 @app.route('/api/log-trade', methods=['POST'])
 def log_trade():
-  from flask import request
-  import random
-
+  global active_trade
   data = request.json or {}
   trade_type = data.get('type', 'CE')
-  entry = data.get('entry', 0)
-  target = data.get('target', 0)
-  sl = data.get('sl', 0)
-  entry_time = data.get('time', get_ist_time())
+  entry = float(data.get('entry', 0))
+  target = float(data.get('target', 0))
+  sl = float(data.get('sl', 0))
+  entry_time = get_ist_time()
 
-  # Simulate exit time a few minutes after entry
-  exit_time = get_ist_time()
-  outcome = 'TARGET HIT 🎯 (+25 Pts)' if random.random() < 0.85 else 'SL HIT 🛑'
-
-  history_item = {
+  active_trade = {
       'entry_time': entry_time,
-      'exit_time': exit_time,
+      'exit_time': 'RUNNING 🔄',
       'type': trade_type,
       'entry': entry,
       'target': target,
       'sl': sl,
-      'outcome': outcome,
+      'status': 'RUNNING',
   }
-  trade_history.insert(0, history_item)
-  if len(trade_history) > 10:
-    trade_history.pop()
+  return jsonify({'status': 'started', 'active_trade': active_trade})
 
-  return jsonify({'status': 'logged', 'history': trade_history})
+
+@app.route('/api/close-trade', methods=['POST'])
+def close_trade():
+  global active_trade
+  if active_trade:
+    active_trade['status'] = 'MANUALLY CLOSED ⏹️'
+    active_trade['exit_time'] = get_ist_time()
+    trade_history.insert(0, active_trade.copy())
+    active_trade = None
+  return jsonify({'status': 'closed'})
 
 
 @app.route('/api/history')
@@ -111,7 +138,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Nifty 50 Pro Terminal - High Win-Rate & History</title>
+    <title>Nifty 50 Pro Terminal - Live Market Tracking</title>
     <style>
         :root {
             --bg-color: #0b0f19;
@@ -158,7 +185,6 @@ HTML_TEMPLATE = """
         }
         .bg-buy { background: rgba(34, 197, 94, 0.2); color: var(--green); border: 1px solid var(--green); }
         .bg-sell { background: rgba(239, 68, 68, 0.2); color: var(--red); border: 1px solid var(--red); }
-        .bg-wait { background: rgba(234, 179, 8, 0.2); color: var(--yellow); border: 1px solid var(--yellow); }
         .panel-card { background: var(--card-bg); border-radius: 6px; padding: 10px; border: 1px solid #1e293b; margin-bottom: 6px; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
         .trade-card {
@@ -173,6 +199,7 @@ HTML_TEMPLATE = """
         .exec-btn { width: 100%; border: none; padding: 6px; font-weight: bold; font-size: 0.75rem; border-radius: 4px; cursor: pointer; margin-top: 6px; }
         .exec-btn-ce { background: var(--green); color: #0b0f19; }
         .exec-btn-pe { background: var(--red); color: white; }
+        .active-trade-box { background: #1e1b4b; border: 1px solid #6366f1; padding: 10px; border-radius: 6px; margin-top: 6px; }
         table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 0.75rem; }
         th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #1e293b; }
         th { color: var(--accent); }
@@ -181,8 +208,8 @@ HTML_TEMPLATE = """
 <body>
 <div class="container">
     <header>
-        <h2>Nifty High Win-Rate Terminal & History</h2>
-        <div class="live-badge">● IST LIVE TIME</div>
+        <h2>Nifty Live Market Trade Tracker</h2>
+        <div class="live-badge">● LIVE TRACKING</div>
     </header>
     <div class="chart-card">
         <div class="chart-container">
@@ -200,32 +227,31 @@ HTML_TEMPLATE = """
     </div>
     <div class="indicator-box">
         <div style="font-size: 0.8rem; font-weight: bold; color: var(--accent); margin-bottom: 4px;">📊 Live Spot Price: <span id="liveSpotPrice" style="color:#fff;">Fetching...</span></div>
-        <div class="ind-row"><span>Strategy Win-Rate Accuracy:</span> <b style="color:var(--green)">89.4% (Verified)</b></div>
-        <div class="signal-banner bg-wait" id="strategySignal">INITIALIZING HIGH WIN-RATE SCANNER...</div>
+        <div class="signal-banner bg-buy" id="strategySignal">SCANNING LIVE MARKET...</div>
     </div>
     <div class="panel-card">
-        <div style="font-size: 0.8rem; color: #cbd5e1; font-weight: bold;">⚡ High Probability Setup (Strict 25 Pts Target)</div>
+        <div style="font-size: 0.8rem; color: #cbd5e1; font-weight: bold;">⚡ High Probability Setup (Target: 25 Pts)</div>
         <div class="grid-2">
             <div class="trade-card ce" id="ceCard">
                 <div class="trade-title"><span>CALL OPTION (CE)</span> <span style="color:var(--green)">BULLISH</span></div>
                 <div class="detail-row"><span>Entry Price:</span> <b id="ceEntry">--</b></div>
                 <div class="detail-row"><span>Target (+25 Pts):</span> <b id="ceTarget" style="color:var(--green)">--</b></div>
                 <div class="detail-row"><span>Stop Loss:</span> <b id="ceSl" style="color:var(--red)">--</b></div>
-                <button class="exec-btn exec-btn-ce" id="ceBtn" onclick="executeTrade('CE')" disabled>🔒 WAITING FOR SETUP</button>
+                <button class="exec-btn exec-btn-ce" id="ceBtn" onclick="executeTrade('CE')" disabled>🔒 WAITING</button>
             </div>
             <div class="trade-card pe" id="peCard">
                 <div class="trade-title"><span>PUT OPTION (PE)</span> <span style="color:var(--red)">BEARISH</span></div>
                 <div class="detail-row"><span>Entry Price:</span> <b id="peEntry">--</b></div>
                 <div class="detail-row"><span>Target (+25 Pts):</span> <b id="peTarget" style="color:var(--green)">--</b></div>
                 <div class="detail-row"><span>Stop Loss:</span> <b id="peSl" style="color:var(--red)">--</b></div>
-                <button class="exec-btn exec-btn-pe" id="peBtn" onclick="executeTrade('PE')" disabled>🔒 WAITING FOR SETUP</button>
+                <button class="exec-btn exec-btn-pe" id="peBtn" onclick="executeTrade('PE')" disabled>🔒 WAITING</button>
             </div>
         </div>
+        <div id="liveRunningTradeContainer"></div>
     </div>
 
-    <!-- Trade History Ledger Card with Entry & Exit Times -->
     <div class="panel-card">
-        <div style="font-size: 0.8rem; color: var(--accent); font-weight: bold; margin-bottom: 4px;">📜 Trade Execution History (Entry & Target Hit Time - IST)</div>
+        <div style="font-size: 0.8rem; color: var(--accent); font-weight: bold; margin-bottom: 4px;">📜 Completed Trades History Ledger (IST Time)</div>
         <div style="overflow-x: auto;">
             <table>
                 <thead>
@@ -235,26 +261,23 @@ HTML_TEMPLATE = """
                         <th>Type</th>
                         <th>Entry</th>
                         <th>Target / SL</th>
-                        <th>Outcome Status</th>
+                        <th>Result Status</th>
                     </tr>
                 </thead>
                 <tbody id="historyTableBody">
-                    <tr><td colspan="6" style="text-align:center; color:#64748b;">No trades executed yet in this session.</td></tr>
+                    <tr><td colspan="6" style="text-align:center; color:#64748b;">No completed trades yet.</td></tr>
                 </tbody>
             </table>
         </div>
     </div>
 </div>
 <script>
-    let currentTimeVal = "";
-
     async function fetchLiveData() {
         try {
             let response = await fetch('/api/live-price');
             let data = await response.json();
             
             document.getElementById('liveSpotPrice').innerText = "₹ " + data.price;
-            currentTimeVal = data.time;
             
             let ceCard = document.getElementById('ceCard');
             let peCard = document.getElementById('peCard');
@@ -266,33 +289,44 @@ HTML_TEMPLATE = """
                 strategySignal.className = "signal-banner bg-buy";
                 strategySignal.innerText = data.signal_msg;
                 ceCard.classList.add('active-setup'); peCard.classList.remove('active-setup');
-                
                 document.getElementById('ceEntry').innerText = data.ce_entry;
                 document.getElementById('ceTarget').innerText = data.ce_target;
                 document.getElementById('ceSl').innerText = data.ce_sl;
                 ceBtn.disabled = false; ceBtn.innerText = "🚀 EXECUTE CE TRADE";
-                
                 document.getElementById('peEntry').innerText = "--"; document.getElementById('peTarget').innerText = "--"; document.getElementById('peSl').innerText = "--";
-                peBtn.disabled = true; peBtn.innerText = "🔒 WAITING FOR SETUP";
-            } else if(data.trend.includes('BEARISH')) {
+                peBtn.disabled = true; peBtn.innerText = "🔒 WAITING";
+            } else {
                 strategySignal.className = "signal-banner bg-sell";
                 strategySignal.innerText = data.signal_msg;
                 peCard.classList.add('active-setup'); ceCard.classList.remove('active-setup');
-                
                 document.getElementById('peEntry').innerText = data.pe_entry;
                 document.getElementById('peTarget').innerText = data.pe_target;
                 document.getElementById('peSl').innerText = data.pe_sl;
                 peBtn.disabled = false; peBtn.innerText = "🔻 EXECUTE PE TRADE";
-                
                 document.getElementById('ceEntry').innerText = "--"; document.getElementById('ceTarget').innerText = "--"; document.getElementById('ceSl').innerText = "--";
-                ceBtn.disabled = true; ceBtn.innerText = "🔒 WAITING FOR SETUP";
-            } else {
-                strategySignal.className = "signal-banner bg-wait";
-                strategySignal.innerText = data.signal_msg;
-                ceCard.classList.remove('active-setup'); peCard.classList.remove('active-setup');
                 ceBtn.disabled = true; ceBtn.innerText = "🔒 WAITING";
-                peBtn.disabled = true; peBtn.innerText = "🔒 WAITING";
             }
+
+            // Render live running trade status box
+            let runContainer = document.getElementById('liveRunningTradeContainer');
+            if(data.active_trade) {
+                runContainer.innerHTML = `
+                    <div class="active-trade-box">
+                        <div style="display:flex; justify-content:space-between; font-size:0.8rem; font-weight:bold; color:#38bdf8;">
+                            <span>🟢 LIVE RUNNING TRADE (${data.active_trade.type})</span>
+                            <span style="color:var(--yellow); animation: pulse 1s infinite;">RUNNING & MONITORING...</span>
+                        </div>
+                        <div class="detail-row" style="margin-top:4px;"><span>Entry Time:</span> <b>${data.active_trade.entry_time}</b></div>
+                        <div class="detail-row"><span>Entry Price:</span> <b>₹ ${data.active_trade.entry}</b></div>
+                        <div class="detail-row"><span>Target / SL:</span> <b>T: ${data.active_trade.target} / SL: ${data.active_trade.sl}</b></div>
+                        <button onclick="closeManual()" style="width:100%; background:#ef4444; color:white; border:none; padding:5px; border-radius:4px; font-weight:bold; font-size:0.75rem; margin-top:5px; cursor:pointer;">⏹️ Exit Trade Manually</button>
+                    </div>
+                `;
+            } else {
+                runContainer.innerHTML = "";
+            }
+
+            loadHistory();
         } catch (err) {
             console.error("Error fetching live price:", err);
         }
@@ -303,32 +337,31 @@ HTML_TEMPLATE = """
         let target = type === 'CE' ? document.getElementById('ceTarget').innerText : document.getElementById('peTarget').innerText;
         let sl = type === 'CE' ? document.getElementById('ceSl').innerText : document.getElementById('peSl').innerText;
 
-        let response = await fetch('/api/log-trade', {
+        await fetch('/api/log-trade', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({type: type, entry: entry, target: target, sl: sl, time: currentTimeVal})
+            body: JSON.stringify({type: type, entry: entry, target: target, sl: sl})
         });
-        let data = await response.json();
-        updateHistoryTable(data.history);
-        alert(`✅ ${type} Trade Executed at IST ${currentTimeVal}! Entry & Exit timestamps recorded.`);
+        fetchLiveData();
+    }
+
+    async function closeManual() {
+        await fetch('/api/close-trade', { method: 'POST' });
+        fetchLiveData();
     }
 
     async function loadHistory() {
         let response = await fetch('/api/history');
         let history = await response.json();
-        updateHistoryTable(history);
-    }
-
-    function updateHistoryTable(history) {
         let tbody = document.getElementById('historyTableBody');
         if(history.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b;">No trades executed yet in this session.</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b;">No completed trades yet.</td></tr>`;
             return;
         }
         let html = "";
         history.forEach(item => {
             let badgeColor = item.type === 'CE' ? 'var(--green)' : 'var(--red)';
-            let outcomeColor = item.outcome.includes('TARGET') ? 'var(--green)' : 'var(--red)';
+            let outcomeColor = item.status.includes('TARGET') ? 'var(--green)' : 'var(--red)';
             html += `
                 <tr>
                     <td>${item.entry_time}</td>
@@ -336,15 +369,15 @@ HTML_TEMPLATE = """
                     <td><b style="color:${badgeColor}">${item.type}</b></td>
                     <td>₹ ${item.entry}</td>
                     <td>T: ${item.target} / SL: ${item.sl}</td>
-                    <td><b style="color:${outcomeColor}">${item.outcome}</b></td>
+                    <td><b style="color:${outcomeColor}">${item.status}</b></td>
                 </tr>
             `;
         });
         tbody.innerHTML = html;
     }
 
-    setInterval(fetchLiveData, 8000);
-    window.onload = () => { fetchLiveData(); loadHistory(); };
+    setInterval(fetchLiveData, 6000);
+    window.onload = fetchLiveData;
 </script>
 </body>
 </html>
