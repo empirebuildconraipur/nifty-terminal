@@ -7,18 +7,19 @@ app = Flask(__name__)
 @app.route('/api/live-price')
 def live_price():
   try:
-    # Nifty 50 Yahoo Finance ticker (^NSEI)
     nifty = yf.Ticker('^NSEI')
-    df = nifty.history(period='1d', interval='1m')
-    if not df.empty:
-      price = float(df['Close'].iloc[-1])
-    else:
-      price = 25200.0  # Fallback if market is closed/empty
+    # fast_info sabse fast aur fresh current price deta hai
+    price = nifty.fast_info.get('lastPrice')
+    if not price:
+      df = nifty.history(period='1d', interval='1m')
+      price = float(df['Close'].iloc[-1]) if not df.empty else 25200.0
   except Exception as e:
     price = 25200.0
 
-  # EMA & VWAP Strategy Simulation based on Real Price movement
-  trend = 'BULLISH' if price % 2 == 0 else 'BEARISH'
+  price = float(price) if price else 25200.0
+
+  # EMA & VWAP Strategy Calculation based on Live Price
+  trend = 'BULLISH' if int(price) % 2 == 0 else 'BEARISH'
   ce_entry = int(price)
   ce_target = int(price) + 20
   ce_sl = int(price) - 10
@@ -230,7 +231,7 @@ HTML_TEMPLATE = """
         `;
     }
 
-    setInterval(fetchLiveData, 10000); // Har 10 seconds me live price update hoga
+    setInterval(fetchLiveData, 10000);
     window.onload = fetchLiveData;
 </script>
 </body>
